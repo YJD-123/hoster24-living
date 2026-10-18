@@ -1,0 +1,1 @@
+{"dependencies":{"mineflayer":"^4.20.0"},"description":"Keepalive bot for Hoster24 MC server (login periodically so the 12h no-player auto-stop never triggers)","main":"bot.js","name":"hoster24-keepalive","private":true,"scripts":{"start":"node bot.js"},"version":"1.0.0"}
