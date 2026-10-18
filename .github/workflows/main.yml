@@ -1,12 +1,19 @@
 name: hoster24-keepalive
 
+# 每 6 小时一轮：bot 登录待 20 分钟再退出，"无人"最长约 5.7 小时，碰不到 12 小时停服线
+# 服务器 online-mode=false + 白名单，bot 用固定用户名离线直登，无需任何账号/密钥
 on:
   schedule:
     - cron: "7 */6 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch: {} # 手动触发：首次验证和调试用
 
 permissions:
-  contents: write
+  contents: write # 只为 heartbeat 提交（防 60 天无活动被停用定时任务）
+
+# 同一时间只跑一轮，避免两轮的 heartbeat 提交互相顶掉（push rejected）
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
 
 jobs:
   keepalive:
@@ -27,17 +34,31 @@ jobs:
           MC_HOST: server.hoster24.org
           MC_PORT: "24825"
           MC_AUTH: offline
-          MC_USER: qx47_kp9z2
+          MC_USER: qx47_kp9z2 # 须与服务器 whitelist.json 里的一致
           STAY_MIN: "20"
         run: node bot.js
 
+      # 仓库 60 天无活动 GitHub 会停用 schedule；每轮自己提交一次心跳保住活动计数
+      # 注意：checkout 之后远端 main 可能已被推进（上一轮心跳/网页端编辑），
+      # 直接 push 会被拒（fetch first）；先 rebase 再推，冲突就基于最新远端重新提交
       - name: Heartbeat commit
         if: always()
         run: |
-          date -u +%FT%TZ > .keepalive
           git config user.email "actions@github.com"
           git config user.name "github-actions[bot]"
+          date -u +%FT%TZ > .keepalive
           git add .keepalive
           git commit -m "keepalive heartbeat" || exit 0
-          git push origin HEAD:main
-
+          for i in 1 2 3; do
+            git fetch origin main
+            if git rebase origin/main; then
+              git push origin HEAD:main && exit 0
+            else
+              git rebase --abort || true
+              git reset --hard origin/main
+              date -u +%FT%TZ > .keepalive
+              git add .keepalive
+              git commit -m "keepalive heartbeat" || exit 0
+            fi
+          done
+          echo "heartbeat push failed after retries" && exit 1
