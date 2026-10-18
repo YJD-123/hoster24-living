@@ -39,4 +39,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git add .keepalive
           git commit -m "keepalive heartbeat" || exit 0
-          git push
+          git push origin HEAD:main
+
