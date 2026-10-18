@@ -2,14 +2,25 @@
 // 登录前先做一次状态 ping：已有人在线就跳过本轮（真玩家本身在重置计时，
 // 且同账号互顶时不能让 bot 把真人踢下线）。
 // 配置全部走环境变量，见 docker-compose.yml / README。
+//
+// 为什么不用 mineflayer、直接用 minecraft-protocol 裸客户端（2026-10-18 实测定案）：
+// 服务器是 MC 26.3（协议 777），JS 生态的协议库最高只到 26.1 / 1.21.11（协议 775）。
+// 靠服务器上的 ViaVersion+ViaBackwards 把 775 客户端翻译接入 777 服时，
+// 客户端bound 的传送包翻译正常，但 mineflayer 进服后发的移动包经翻译后会被服务器判
+// "Invalid move player packet received" 秒踢（5.12.1 与 5.12.2-SNAPSHOT 均复现，
+// 且与 ServerCore 插件无关）。保活 bot 根本不需要移动：裸客户端只做
+// 登录 → 确认传送（teleport_confirm）→ 应答 keepalive，全程不发任何移动包，即可稳挂。
 const net = require('net')
-const mineflayer = require('mineflayer')
+const mc = require('minecraft-protocol')
 
 const HOST = process.env.MC_HOST || 'server.hoster24.org'
 const PORT = parseInt(process.env.MC_PORT || '24825', 10)
 const USERNAME = process.env.MC_USER || 'qx47_kp9z2'
 const AUTH = process.env.MC_AUTH || 'offline' // 'offline' | 'microsoft'
 const STAY_MS = parseInt(process.env.STAY_MIN || '60', 10) * 60 * 1000
+// 客户端协议版本写死 1.21.11（协议 775）：服务器端 ViaBackwards 负责翻译到 26.3。
+// 不要改成自动识别——状态 ping 回的版本名是 "26.3"，协议库不认识会直接报错。
+const VERSION = process.env.MC_VERSION || '1.21.11'
 
 function log (...args) { console.log(new Date().toISOString(), ...args) }
 
@@ -85,36 +96,48 @@ async function main () {
     process.exit(0)
   }
 
-  const bot = mineflayer.createBot({
+  const client = mc.createClient({
     host: HOST,
     port: PORT,
     username: USERNAME,
     auth: AUTH,
+    version: VERSION,
     // 微软授权的 token 缓存目录（NAS 上落在挂载卷里；GitHub Actions 里由 cache 持久化）
     profilesFolder: process.env.MC_PROFILES_FOLDER || './msa-cache'
-    // version 不写：mineflayer 先 ping 服务器自动识别协议版本
+    // keepAlive 默认即 true：协议库自动应答服务器 keepalive，不要手动再回（会重复）
   })
 
   let done = false
+  let spawned = false
   function finish (code, msg) {
     if (done) return
     done = true
     log(msg)
-    try { bot.quit() } catch {}
+    try { client.end() } catch {}
     setTimeout(() => process.exit(code), 500)
   }
 
-  bot.once('login', () => log('logged in as', bot.username))
-  bot.once('spawn', () => {
-    log('spawned; staying', STAY_MS / 60000, 'min')
+  client.once('login', () => {
+    log('logged in as', USERNAME)
+    // 从登录成功开始计待机时长；spawn 只是紧随其后的传送确认
     setTimeout(() => finish(0, 'stay complete, leaving'), STAY_MS)
+    // 硬超时兜底：挂住的会话最多多留 5 分钟就强退
+    setTimeout(() => finish(1, 'hard timeout'), STAY_MS + 5 * 60 * 1000)
   })
-  bot.on('kicked', (reason) => finish(1, 'kicked: ' + JSON.stringify(reason)))
-  bot.on('error', (err) => finish(1, 'error: ' + (err && err.message)))
-  bot.on('end', () => { if (!done) finish(1, 'connection ended early') })
 
-  // 硬超时兜底：挂住的会话最多多留 5 分钟就强退
-  setTimeout(() => finish(1, 'hard timeout'), STAY_MS + 5 * 60 * 1000)
+  // 服务器传送（进服/换维度/被拉回）只确认、绝不回移动包——见文件头注释
+  client.on('position', (packet) => {
+    try { client.write('teleport_confirm', { teleportId: packet.teleportId }) } catch {}
+    if (!spawned) {
+      spawned = true
+      log('spawned; staying', STAY_MS / 60000, 'min')
+    }
+  })
+
+  client.on('kick_disconnect', (packet) => finish(1, 'kicked: ' + JSON.stringify(packet && packet.reason)))
+  client.on('disconnect', (packet) => finish(1, 'disconnected: ' + JSON.stringify(packet && packet.reason)))
+  client.on('error', (err) => finish(1, 'error: ' + (err && err.message)))
+  client.on('end', () => { if (!done) finish(1, 'connection ended early') })
 }
 
 main()
