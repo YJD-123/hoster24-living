@@ -1,0 +1,42 @@
+name: hoster24-keepalive
+
+on:
+  schedule:
+    - cron: "7 */6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        run: npm install --no-audit --no-fund
+
+      - name: Run keepalive bot
+        env:
+          MC_HOST: server.hoster24.org
+          MC_PORT: "24825"
+          MC_AUTH: offline
+          MC_USER: qx47_kp9z2
+          STAY_MIN: "20"
+        run: node bot.js
+
+      - name: Heartbeat commit
+        if: always()
+        run: |
+          date -u +%FT%TZ > .keepalive
+          git config user.email "actions@github.com"
+          git config user.name "github-actions[bot]"
+          git add .keepalive
+          git commit -m "keepalive heartbeat" || exit 0
+          git push
